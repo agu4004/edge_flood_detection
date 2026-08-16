@@ -1,71 +1,108 @@
 # Deploy Water Controller lên Raspberry Pi
 
-Tài liệu này chỉ mô tả hai thành phần production: Raspberry Pi controller và
-ESP32 sensor node. Source được lấy trực tiếp từ Git; không cần controller hoặc
-server trung gian.
+Kiến trúc duy nhất của project là Raspberry Pi, ESP32 và thiết bị mở dashboard
+cùng kết nối một Wi-Fi router. Pi không phát access point riêng.
 
 ## 1. Topology
 
-### Pi phát AP độc lập
-
 ```text
-ESP32 → Wi-Fi WaterController → Raspberry Pi
-                                 ├── 10.42.0.1:8000 FastAPI
-                                 ├── 10.42.0.1:1883 MQTT
-                                 ├── SQLite
-                                 └── edge-controller.local
-```
-
-### Pi và ESP cùng Wi-Fi router
-
-```text
-Router Wi-Fi
-  ├── Raspberry Pi: FastAPI + MQTT + SQLite
+Wi-Fi router 2,4 GHz
+  ├── Raspberry Pi
+  │     ├── edge-controller.local
+  │     ├── FastAPI/dashboard :8000
+  │     ├── Mosquitto MQTT    :1883
+  │     └── SQLite
   ├── ESP32 water-001
-  └── ESP32 water-002
+  ├── ESP32 water-002
+  └── điện thoại/tablet/laptop
 ```
 
-LAN mode cần mDNS `edge-controller.local` hoạt động và router không bật client
-isolation.
+Không dùng Guest Wi-Fi hoặc router bật client isolation. ESP32 chỉ tìm Pi qua
+mDNS `edge-controller.local`; gateway DHCP là router và không được dùng làm
+địa chỉ controller.
 
 ## 2. Chuẩn bị Raspberry Pi
 
 Dùng Raspberry Pi OS Lite 64-bit. Trong Raspberry Pi Imager:
 
-- tạo username/password;
+- tạo username/password, mặc định tài liệu dùng `admin`;
 - bật SSH;
 - đặt WLAN country `VN`;
-- cấu hình Wi-Fi router nếu sẽ dùng LAN mode.
+- cấu hình Wi-Fi router đang dùng cho ESP32.
 
-Đăng nhập Pi rồi clone repository:
+Đăng nhập Pi và clone repository:
 
 ```bash
 ssh admin@PI_IP
 sudo apt update
 sudo apt install -y git
-git clone https://github.com/USER/REPOSITORY.git ~/water-controller-project
+git clone https://github.com/agu4004/edge_flood_detection.git ~/water-controller-project
 cd ~/water-controller-project
 ```
 
-## 3. Firmware ESP32
+## 3. Cài controller
 
-Firmware production hiện tại:
+```bash
+sudo bash deploy/pi/install.sh
+sudo reboot
+```
+
+Installer thực hiện:
+
+1. cài Python, Mosquitto, Avahi, Git và OpenSSH server;
+2. cài app vào `/opt/water-controller`;
+3. tạo Python venv và cài dependencies;
+4. cấu hình Mosquitto tại cổng `1883`;
+5. thêm deployment public key vào `authorized_keys` của user `admin`;
+6. đặt hostname `edge-controller`;
+7. enable và khởi động các systemd service.
+
+Installer không tạo, xóa hoặc sửa cấu hình Wi-Fi. Nếu username SSH không phải
+`admin`, truyền rõ khi cài:
+
+```bash
+sudo WATER_SSH_USER='pi-user' bash deploy/pi/install.sh
+```
+
+Public key được version-control tại:
+
+```text
+deploy/pi/ssh/water-controller-deploy.pub
+```
+
+Private key tương ứng không nằm trong Git. Trên máy quản trị đang giữ private
+key, có thể đăng nhập bằng:
+
+```bash
+ssh -i PATH_TO_PRIVATE_KEY admin@edge-controller.local
+```
+
+## 4. Kiểm tra deployment
+
+```bash
+cd ~/water-controller-project
+sudo bash deploy/pi/verify.sh
+```
+
+Script kiểm tra SSH, Mosquitto, Avahi, Water Controller, IP LAN, mDNS,
+FastAPI health và MQTT publish. Dashboard truy cập bằng:
+
+```text
+http://edge-controller.local:8000/
+http://water-monitor.local:8000/
+http://PI_LAN_IP:8000/
+```
+
+## 5. Firmware ESP32
+
+Firmware production:
 
 ```text
 esp32/water_edge_node/water_edge_node.ino
 ```
 
-Phiên bản 1.2.1 tìm controller theo thứ tự:
-
-```text
-edge-controller.local → WiFi.gatewayIP() → retry
-```
-
-Gateway fallback chỉ trỏ đúng Pi trong AP mode. Firmware hỗ trợ `wifi_reset`
-để xóa riêng Wi-Fi nhưng giữ device ID/topic, và có Wi-Fi diagnostics cho
-SSID, RSSI, kênh, auth mode cùng disconnect reason.
-
-Có thể build/upload ngay từ Pi khi ESP32 nối USB:
+Firmware 1.3.0 tìm controller bằng `edge-controller.local`. Có thể build và
+upload từ Pi khi ESP32 nối USB:
 
 ```bash
 arduino-cli core install esp32:esp32
@@ -74,109 +111,15 @@ arduino-cli compile --upload --port /dev/ttyUSB0 \
   --fqbn esp32:esp32:esp32 ./esp32/water_edge_node
 ```
 
-## 4. Cài Pi ở chế độ phát AP
-
-Chạy tại root repository:
-
-```bash
-sudo WATER_AP_PASSWORD='12345678' bash deploy/pi/install.sh
-sudo reboot
-```
-
-Installer thực hiện:
-
-1. cài Python, Mosquitto, Avahi và NetworkManager;
-2. cài app vào `/opt/water-controller`;
-3. tạo Python venv và cài dependencies;
-4. cấu hình Mosquitto tại `1883`;
-5. tạo AP `WaterController`, `10.42.0.1/24`, DHCP/NAT;
-6. đặt hostname `edge-controller`;
-7. enable `water-controller.service`.
-
-Sau reboot:
-
-```text
-SSID       WaterController
-Password   12345678
-Pi IP      10.42.0.1
-Dashboard  http://10.42.0.1:8000/
-SSH        ssh admin@10.42.0.1
-```
-
-Kiểm tra deployment AP:
-
-```bash
-cd ~/water-controller-project
-sudo bash deploy/pi/verify.sh
-```
-
-## 5. Chuyển Pi sang Wi-Fi router
-
-Liệt kê profile NetworkManager:
-
-```bash
-nmcli connection show
-```
-
-Ưu tiên profile Wi-Fi router và tắt autoconnect AP:
-
-```bash
-sudo nmcli connection modify 'HOME_WIFI_PROFILE' \
-  connection.autoconnect yes connection.autoconnect-priority 200
-sudo nmcli connection modify WaterController connection.autoconnect no
-```
-
-AP unit mặc định quảng bá alias dashboard về `10.42.0.1`. Trong LAN mode,
-tạo systemd override để app tự phát hiện IP:
-
-```bash
-sudo systemctl edit water-controller.service
-```
-
-Nhập:
-
-```ini
-[Service]
-Environment=WATER_MDNS_ADDRESS=
-```
-
-Áp dụng:
-
-```bash
-sudo systemctl daemon-reload
-sudo reboot
-```
-
-Sau reboot, lấy IP bằng router hoặc:
-
-```bash
-hostname -I
-```
-
-Dashboard:
-
-```text
-http://edge-controller.local:8000/
-http://water-monitor.local:8000/
-http://PI_LAN_IP:8000/
-```
-
-## 6. Provision ESP32
-
-Với từng node fresh hoặc đã `wifi_reset`:
+Provision từng ESP32 fresh hoặc đã `wifi_reset`:
 
 1. kết nối `WaterSensor-Setup`, password `12345678`;
 2. mở `http://192.168.4.1/`;
-3. nhập `WaterController/12345678` trong AP mode, hoặc Wi-Fi router trong LAN
-   mode;
-4. ESP nhận DHCP IP;
-5. ESP tìm `edge-controller.local`, đăng ký FastAPI và kết nối MQTT;
-6. node xuất hiện trên dashboard.
+3. nhập SSID/password của cùng Wi-Fi router đang kết nối Pi;
+4. ESP32 nhận IP DHCP và resolve `edge-controller.local`;
+5. ESP32 đăng ký FastAPI, kết nối MQTT và xuất hiện trên dashboard.
 
-Board từng đăng ký sẽ nhận lại device ID cũ theo hardware ID nếu database Pi
-vẫn còn record tương ứng.
-
-## 7. Quản lý server
+## 6. Quản trị server
 
 ```bash
 sudo systemctl status water-controller --no-pager
@@ -186,34 +129,30 @@ sudo journalctl -u water-controller -f
 sudo journalctl -u mosquitto -f
 ```
 
-Health/MQTT:
-
 ```bash
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/api/devices
 mosquitto_sub -h 127.0.0.1 -t 'devices/#' -v
 ```
 
-## 8. Cập nhật từ Git
+## 7. Cập nhật từ Git
 
 ```bash
 cd ~/water-controller-project
 git pull --ff-only
-sudo WATER_AP_PASSWORD='12345678' bash deploy/pi/install.sh
+sudo bash deploy/pi/install.sh
 ```
 
-Installer giữ database live trong `/opt/water-controller/data/`. Nếu Pi đang
-dùng LAN mode, installer sẽ cấu hình AP lại; đặt lại:
+Installer giữ database live trong `/opt/water-controller/data/` và không thay
+đổi Wi-Fi. Để thay database bằng snapshot repository:
 
 ```bash
-sudo nmcli connection modify WaterController connection.autoconnect no
-sudo systemctl restart water-controller
+sudo WATER_REPLACE_DATABASE=1 bash deploy/pi/install.sh
 ```
 
-## 9. Khôi phục database demo
+## 8. Khôi phục database demo
 
-Repository có snapshot `controller/data/water_controller.demo.db` gồm 2 node
-và 1 link:
+Repository có `controller/data/water_controller.demo.db` gồm 2 node và 1 link:
 
 ```bash
 sudo systemctl stop water-controller
@@ -223,7 +162,8 @@ sudo install -o watercontroller -g watercontroller -m 0640 \
 sudo systemctl start water-controller
 ```
 
-## 10. Lưu ý prototype
+## 9. Lưu ý prototype
 
-Mosquitto đang dùng `allow_anonymous true`. Weather và Overpass cần Internet;
-sensor, MQTT, SQLite và dashboard vẫn chạy offline trong AP mode.
+Mosquitto đang dùng `allow_anonymous true`; chỉ triển khai trong Wi-Fi LAN tin
+cậy. Weather và Overpass cần Internet, còn sensor, MQTT, SQLite và dashboard
+vẫn hoạt động khi Internet tạm mất miễn là router LAN vẫn hoạt động.

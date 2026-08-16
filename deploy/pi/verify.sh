@@ -13,15 +13,16 @@ check_service() {
   fi
 }
 
-check_service NetworkManager.service
+check_service ssh.service
 check_service mosquitto.service
 check_service avahi-daemon.service
 check_service water-controller.service
 
-if ip -4 -o address show dev wlan0 | grep -q '10\.42\.0\.1/24'; then
-  echo "[OK] wlan0 owns 10.42.0.1/24"
+PI_LAN_IP="$(hostname -I | awk '{print $1}')"
+if [[ -n "${PI_LAN_IP}" ]]; then
+  echo "[OK] Raspberry Pi LAN IP: ${PI_LAN_IP}"
 else
-  echo "[FAIL] wlan0 does not own 10.42.0.1/24"
+  echo "[FAIL] Raspberry Pi has no LAN address"
   failures=$((failures + 1))
 fi
 
@@ -40,11 +41,17 @@ else
   failures=$((failures + 1))
 fi
 
+if avahi-resolve-host-name edge-controller.local >/dev/null 2>&1; then
+  echo "[OK] edge-controller.local resolves through mDNS"
+else
+  echo "[FAIL] edge-controller.local does not resolve locally"
+  failures=$((failures + 1))
+fi
+
 echo
-nmcli -f NAME,TYPE,DEVICE connection show --active
+ip -brief -4 address
 echo
 echo "Dashboard: http://water-monitor.local:8000/"
-echo "Fallback:  http://10.42.0.1:8000/"
+[[ -n "${PI_LAN_IP}" ]] && echo "LAN IP:    http://${PI_LAN_IP}:8000/"
 
 exit "${failures}"
-

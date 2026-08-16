@@ -60,7 +60,7 @@
 
 Project xây dựng một hệ thống IoT cục bộ để đo, tổng hợp và trực quan hóa mực nước. Mỗi trạm đo sử dụng ESP32 và cảm biến siêu âm HY-SRF05. Các trạm kết nối Wi-Fi, tự đăng ký với controller, gửi telemetry qua MQTT và vẫn duy trì đo cùng trang trạng thái cục bộ khi controller hoặc broker gián đoạn. Controller sử dụng FastAPI, Mosquitto và SQLite, cung cấp dashboard realtime, hiệu chuẩn chiều cao bể, mô hình liên kết giữa các node, cảnh báo ngập/tắc nghẽn và dự báo mưa theo khu vực Hà Nội.
 
-Kiến trúc triển khai mục tiêu đặt controller trên Raspberry Pi. Pi phát access point `WaterController`, dùng địa chỉ cố định `10.42.0.1`, cấp DHCP/NAT cho node, chạy Mosquitto và ứng dụng FastAPI dưới `systemd`. Internet qua Ethernet chỉ cần cho Open-Meteo và OpenStreetMap; chức năng đo, MQTT, SQLite và dashboard cục bộ có thể tiếp tục hoạt động khi mất Internet.
+Kiến trúc triển khai mục tiêu đặt controller trên Raspberry Pi. Pi, các ESP32 và thiết bị vận hành cùng kết nối một Wi-Fi router; Pi chạy Mosquitto và ứng dụng FastAPI dưới `systemd`, quảng bá `edge-controller.local` qua mDNS. Internet chỉ cần cho Open-Meteo và OpenStreetMap; chức năng đo, MQTT, SQLite và dashboard cục bộ vẫn hoạt động khi Internet mất nhưng mạng LAN còn hoạt động.
 
 Mức độ hiện tại phù hợp với **prototype/MVP trong mạng cục bộ tin cậy**. Các chức năng cốt lõi đã có đầy đủ trong mã nguồn: captive provisioning, lưu NVS, đăng ký idempotent, MQTT Last Will, telemetry, WebSocket, hiệu chuẩn, cảnh báo ba mức, quản lý vị trí/giao lộ và bộ cài Raspberry Pi.
 
@@ -72,8 +72,8 @@ Tại thời điểm lập báo cáo:
 - Năm module Python chính và hai Bash deployment script vượt qua kiểm tra cú pháp.
 - Database demo có 2 node, 1 link, 6 tham số cảnh báo, 12 khu vực thời tiết và 2 giao lộ.
 - FastAPI, Mosquitto, mDNS, dashboard và MQTT publish đã được xác minh trên Raspberry Pi.
-- Firmware 1.2.1 đã được biên dịch bằng ESP32 Arduino core 3.1.3.
-- Thư mục gốc có tệp tên `.pi_deploy_key`; cần coi đây là bí mật triển khai, xác minh, thu hồi/rotate nếu là khóa thật và loại khỏi mọi gói bàn giao.
+- Firmware 1.3.0 loại bỏ DHCP gateway fallback vì gateway trên LAN là router.
+- Repository lưu deployment SSH public key; private key tương ứng vẫn là artifact cục bộ bị `.gitignore` loại trừ.
 
 ---
 
@@ -152,7 +152,7 @@ Dữ liệu cảm biến được bổ sung bằng dự báo lượng mưa theo 
 - Độ chính xác thực tế của HY-SRF05 trong môi trường nước, hơi ẩm và nhiễu bề mặt.
 - Khả năng chịu tải khi có số lượng lớn node/WebSocket client.
 - Khả năng hoạt động dài hạn trên Raspberry Pi thật.
-- Chất lượng vùng phủ Wi-Fi/AP ngoài hiện trường.
+- Chất lượng vùng phủ Wi-Fi router ngoài hiện trường.
 - End-to-end với ESP32, Mosquitto và Open-Meteo/Overpass trong phiên đánh giá này.
 
 ---
@@ -166,7 +166,7 @@ Dữ liệu cảm biến được bổ sung bằng dự báo lượng mưa theo 
 | FR-01 | Đo khoảng cách bằng HY-SRF05 mỗi giây | Đã triển khai |
 | FR-02 | Mở AP/captive portal khi chưa có Wi-Fi | Đã triển khai |
 | FR-03 | Lưu Wi-Fi và định danh vào NVS | Đã triển khai |
-| FR-04 | Tìm controller qua mDNS, fallback DHCP gateway | Đã triển khai |
+| FR-04 | Tìm controller qua mDNS `edge-controller.local` | Đã triển khai |
 | FR-05 | Đăng ký idempotent theo hardware ID | Đã triển khai |
 | FR-06 | Gửi status và distance qua MQTT | Đã triển khai |
 | FR-07 | Nhận `measure_now`, `restart`, `wifi_reset`, `factory_reset` | Đã triển khai |
@@ -210,7 +210,6 @@ flowchart LR
     end
 
     subgraph P[Raspberry Pi Controller]
-        AP[NetworkManager AP\n10.42.0.1]
         M[Mosquitto :1883]
         A[FastAPI :8000]
         DB[(SQLite WAL)]
@@ -220,11 +219,11 @@ flowchart LR
         MDNS --- A
     end
 
-    N1 <-->|Wi-Fi / MQTT| AP
-    N2 <-->|Wi-Fi / MQTT| AP
-    AP --- M
-    AP --- A
-    U[Trình duyệt vận hành] <-->|HTTP + WebSocket| A
+    R[Wi-Fi router] --- N1
+    R --- N2
+    R --- M
+    R --- A
+    U[Trình duyệt vận hành] <-->|Wi-Fi / HTTP + WebSocket| R
     A <-->|HTTPS ra Internet| OM[Open-Meteo]
     A <-->|HTTPS ra Internet| OS[OSM Overpass]
 ```
@@ -240,22 +239,21 @@ flowchart LR
 | Persistence | SQLite | Identity, latest telemetry, settings, topology, vị trí |
 | Presentation | HTML/CSS/JS | Dashboard, settings, weather management |
 | External data | Open-Meteo, OSM Overpass | Dự báo, geocoding và dữ liệu đường/giao lộ |
-| Infrastructure | NetworkManager, Avahi, systemd | AP, DHCP/NAT, mDNS và service lifecycle |
+| Infrastructure | Wi-Fi router, Avahi, systemd | LAN/DHCP, mDNS và service lifecycle |
 
 ### 5.3 Topology mạng mục tiêu
 
 | Hạng mục | Giá trị |
 |---|---|
-| SSID vận hành | `WaterController` |
-| Interface AP mặc định | `wlan0` |
-| Dải mạng | `10.42.0.0/24` |
-| Gateway/controller | `10.42.0.1` |
-| Controller discovery | `edge-controller.local`, sau đó DHCP gateway |
+| SSID vận hành | SSID Wi-Fi router của địa điểm |
+| Kết nối Pi | Wi-Fi LAN, IP do router cấp |
+| Gateway | Router Wi-Fi, không phải controller |
+| Controller discovery | `edge-controller.local` qua mDNS |
 | Dashboard mDNS | `water_monitor.local`, `water-monitor.local` |
 | HTTP controller | TCP 8000 |
 | MQTT | TCP 1883 |
 | Local web ESP32 | TCP 80 |
-| Internet uplink đề xuất | `eth0` |
+| Internet uplink | Chính Wi-Fi router hoặc Ethernet nếu có |
 
 ---
 
@@ -267,7 +265,7 @@ flowchart LR
 |---|---|
 | ESP32 | Xử lý edge, Wi-Fi, HTTP, MQTT, NVS và mDNS |
 | HY-SRF05 | Cảm biến khoảng cách siêu âm |
-| Raspberry Pi | AP và controller trung tâm |
+| Raspberry Pi | Controller trung tâm trên Wi-Fi LAN |
 | Mạch hạ áp/level shifter | Bảo vệ GPIO nhận echo 3,3 V |
 | Nguồn 5 V ổn định | Cấp nguồn cảm biến và board theo thiết kế thực tế |
 
@@ -308,7 +306,7 @@ Hệ số 0,0343 cm/µs là tốc độ âm thanh quy ước; phép chia 2 tươ
 
 | Hạng mục | Giá trị |
 |---|---|
-| Firmware khai báo | `1.2.1` |
+| Firmware khai báo | `1.3.0` |
 | Serial | 115200 baud |
 | Thư viện ngoài | PubSubClient |
 | Thư viện ESP32 core | WiFi, WebServer, DNSServer, Preferences, HTTPClient, ESPmDNS |
@@ -322,7 +320,7 @@ Hệ số 0,0343 cm/µs là tốc độ âm thanh quy ước; phép chia 2 tươ
 | `SensorManager` | Điều khiển TRIG/ECHO và tính khoảng cách |
 | `ProvisioningServer` | SoftAP, DNS wildcard, captive portal và form lưu Wi-Fi |
 | `WiFiConnectionManager` | Kết nối lúc boot và duy trì reconnect |
-| `ControllerDiscovery` | Resolve mDNS và fallback gateway |
+| `ControllerDiscovery` | Resolve mDNS `edge-controller.local` |
 | `ControllerClient` | Đăng ký HTTP với FastAPI |
 | `MQTTManager` | Kết nối, LWT, subscribe command, publish telemetry |
 | `LocalWebServer` | Trang trạng thái, JSON `/status`, local factory reset |
@@ -481,7 +479,7 @@ Sau khi cập nhật SQLite, controller lập snapshot dashboard mới và broad
 sequenceDiagram
     participant U as Kỹ thuật viên
     participant E as ESP32
-    participant D as mDNS/DHCP
+    participant D as mDNS
     participant C as FastAPI
     participant S as SQLite
     participant M as Mosquitto
@@ -489,11 +487,7 @@ sequenceDiagram
     U->>E: Nhập SSID/password qua captive portal
     E->>E: Lưu NVS và reboot
     E->>D: Resolve edge-controller.local
-    alt mDNS thành công
-        D-->>E: IP controller
-    else mDNS thất bại
-        E->>E: Dùng DHCP gateway
-    end
+    D-->>E: IP controller hoặc retry nếu chưa resolve
     E->>C: POST /api/devices/register
     C->>S: Upsert theo hardware_id
     S-->>C: water-NNN + topic
@@ -802,23 +796,24 @@ So sánh `rain_6h_mm` với `rain_level1_6h_mm` và `rain_level2_6h_mm` để t�
 ### 14.1 Nền tảng mục tiêu
 
 - Raspberry Pi OS Lite 64-bit.
-- `wlan0` dùng làm access point 2,4 GHz, channel 6.
-- `eth0` khuyến nghị làm uplink Internet và quản trị từ xa.
-- NetworkManager `ipv4.method shared` cung cấp DHCP/NAT.
+- Raspberry Pi kết nối cùng Wi-Fi router với các ESP32.
+- Router phải cho phép client giao tiếp và multicast mDNS; không dùng Guest Wi-Fi/client isolation.
+- Pi nhận IP bằng DHCP; operator ưu tiên mDNS thay vì hard-code địa chỉ.
 
 ### 14.2 Quy trình cài tự động
 
 `install.sh` thực hiện:
 
-1. Cài Python, venv, pip, Mosquitto, clients, Avahi, curl và NetworkManager.
+1. Cài Python, venv, pip, Mosquitto, clients, Avahi, curl, Git và OpenSSH server.
 2. Tạo system user `watercontroller` không có login shell.
 3. Cài app vào `/opt/water-controller`, quyền thư mục 0750.
 4. Tạo venv và cài `requirements.txt`.
 5. Cấu hình Mosquitto listen `0.0.0.0:1883`, anonymous.
-6. Tạo/điều chỉnh AP `WaterController` tại `10.42.0.1/24` với WPA-PSK.
+6. Cài deployment public key vào `authorized_keys` của SSH user.
 7. Đặt hostname Pi `edge-controller`.
 8. Cài/enable `water-controller.service` và các service phụ thuộc.
-9. Yêu cầu reboot để chuyển `wlan0` sang AP.
+
+Installer không tạo, xóa hoặc thay đổi access point/Wi-Fi profile của Pi.
 
 ### 14.3 systemd service
 
@@ -830,7 +825,7 @@ So sánh `rain_6h_mm` với `rain_level1_6h_mm` và `rain_level2_6h_mm` để t�
 | Restart | `on-failure`, sau 5 giây |
 | UMask | `0027` |
 | Requires | `mosquitto.service` |
-| mDNS address | `10.42.0.1` |
+| mDNS address | Tự phát hiện theo IP LAN hiện tại |
 
 Python Zeroconf trên Pi quảng bá hai alias dashboard. Hostname `edge-controller.local` do hostname hệ thống và Avahi đảm nhiệm.
 
@@ -842,15 +837,19 @@ Installer mặc định giữ database đang có trên Pi. Repository lưu thêm
 `WATER_REPLACE_DATABASE=1`, database cũ được backup vào
 `/var/backups/water-controller/<timestamp>` trước khi thay.
 
+Public key `deploy/pi/ssh/water-controller-deploy.pub` được installer thêm vào
+`authorized_keys`; private key tương ứng không nằm trong Git.
+
 ### 14.5 Xác minh sau cài đặt
 
 `verify.sh` kiểm tra:
 
-- NetworkManager, Mosquitto, Avahi và Water Controller đang active.
-- `wlan0` có `10.42.0.1/24`.
+- SSH, Mosquitto, Avahi và Water Controller đang active.
+- Pi có địa chỉ IPv4 LAN.
 - `/health` phản hồi.
 - Mosquitto nhận publish cục bộ.
-- In các network connection active và địa chỉ dashboard.
+- `edge-controller.local` resolve được cục bộ.
+- In các địa chỉ IPv4 và địa chỉ dashboard.
 
 Script chưa kiểm tra subscribe round-trip, database writable, mDNS resolution từ client, WebSocket hoặc một ESP32 thật.
 
@@ -864,7 +863,7 @@ Script chưa kiểm tra subscribe round-trip, database writable, mDNS resolution
 |---|---|---|
 | Wi-Fi lưu sẵn sai khi boot | Sau 20 giây về provisioning AP | Khôi phục tại chỗ được |
 | Wi-Fi rớt khi đang chạy | Reconnect mỗi 15 giây | Sensor loop vẫn chạy |
-| mDNS controller lỗi | Dùng DHCP gateway | Tốt trên AP Pi; có thể sai trên LAN khác |
+| mDNS controller lỗi | Retry mỗi 10 giây | Không kết nối nhầm vào DHCP gateway/router |
 | MQTT lỗi | Retry 5 giây; sau 3 lần re-resolve controller | Có self-recovery |
 | FastAPI/MQTT controller dừng | ESP32 vẫn đo/local web; telemetry không được buffer | Mất dữ liệu trong thời gian gián đoạn |
 | Internet mất | Sensor/controller cục bộ hoạt động; weather dùng cache RAM nếu có | Không ảnh hưởng đo trực tiếp |
@@ -890,13 +889,13 @@ Hiện mới có backup tự động khi installer được yêu cầu thay data
 
 ### 16.1 Mô hình tin cậy hiện tại
 
-Hệ thống giả định AP `WaterController` hoặc LAN là mạng tin cậy. Mô hình này phù hợp thử nghiệm kín nhưng không phù hợp khi người lạ có thể vào mạng, khi port được route ra ngoài hoặc khi Pi dùng chung với hệ thống khác.
+Hệ thống giả định Wi-Fi LAN là mạng tin cậy. Mô hình này phù hợp thử nghiệm kín nhưng không phù hợp khi người lạ có thể vào mạng, khi port được route ra ngoài hoặc khi Pi dùng chung với hệ thống khác.
 
 ### 16.2 Phát hiện chính
 
 | ID | Mức | Phát hiện | Hệ quả |
 |---|---|---|---|
-| SEC-01 | Nghiêm trọng | Có tệp `.pi_deploy_key` trong thư mục project | Nguy cơ lộ khóa SSH qua sao chép/archive/backup |
+| SEC-01 | Thấp | Repository phân phối SSH public key dùng chung cho deployment | Cần quản lý/thu hồi key trong `authorized_keys` khi kết thúc project |
 | SEC-02 | Cao | Mosquitto `allow_anonymous true`, không TLS | Giả mạo telemetry, gửi lệnh reset/restart |
 | SEC-03 | Cao | Toàn bộ API/controller không authentication/authorization | Người trong LAN có thể sửa/xóa node, link, ngưỡng |
 | SEC-04 | Cao | HTTP và WebSocket không TLS | Có thể nghe lén/chỉnh sửa trong mạng không tin cậy |
@@ -915,17 +914,17 @@ Hệ thống giả định AP `WaterController` hoặc LAN là mạng tin cậy.
 - SQL dùng parameter binding; phần tên cột động chỉ lấy từ allow-list nội bộ.
 - Frontend escape dữ liệu khi render HTML.
 - Wi-Fi password không ghi vào Serial.
-- Installer yêu cầu AP password 8–63 ký tự.
+- Installer chỉ cài public key; private key bị `.gitignore` loại trừ.
 
 ### 16.4 Khuyến nghị ưu tiên
 
-1. Ngay lập tức xác minh `.pi_deploy_key`; nếu là khóa thật, rotate/revoke, chuyển sang secret store/SSH agent và bảo đảm không đưa vào artifact.
+1. Giữ private SSH key ngoài repository, giới hạn quyền file và thu hồi public key khỏi Pi khi kết thúc project.
 2. Bật MQTT username/password riêng từng node hoặc certificate; cấu hình ACL chỉ cho phép đúng topic của node.
 3. Thêm HTTPS và WSS, tối thiểu qua reverse proxy cục bộ.
 4. Thêm đăng nhập, role operator/admin và CSRF protection cho các thao tác thay đổi.
 5. Dùng provisioning secret duy nhất theo thiết bị hoặc one-time code.
 6. Thiết kế command envelope có `command_id`, timestamp/nonce, chữ ký hoặc MAC và topic acknowledgement.
-7. Thêm rate limit, audit log và network firewall chỉ cho phép interface AP cần thiết.
+7. Thêm rate limit, audit log và firewall giới hạn truy cập từ subnet LAN cần thiết.
 
 ---
 
@@ -941,7 +940,7 @@ Hệ thống giả định AP `WaterController` hoặc LAN là mạng tin cậy.
 | T-04 | SQLite `PRAGMA foreign_key_check` | PASS | 0 dòng vi phạm |
 | T-05 | Kiểm tra FastAPI 8000 và Mosquitto 1883 trên Pi | PASS | Service active |
 | T-06 | Gọi `http://127.0.0.1:8000/health` trên Pi | PASS | MQTT/mDNS/weather/database OK |
-| T-07 | Biên dịch firmware 1.2.1 | PASS | Flash 78%, RAM 15% |
+| T-07 | Biên dịch firmware 1.3.0 | PASS | Flash 78%, RAM 15% |
 | T-08 | SQLite demo snapshot | PASS | 2 node, 1 link, integrity `ok` |
 | T-09 | Markdown link/code fence | PASS | Không có link nội bộ hỏng |
 
@@ -955,7 +954,7 @@ Hệ thống giả định AP `WaterController` hoặc LAN là mạng tin cậy.
 | Weather locations | 12 |
 | Intersections đã lưu | 2 |
 
-Hai device trong database demo đều khai báo firmware `1.0.0`, trong khi source firmware hiện tại là `1.2.1`. Cả hai có trạng thái lưu gần nhất là `offline`. Đây là dấu hiệu snapshot chứa node chưa nâng cấp hoặc chưa đăng ký lại sau khi nâng cấp.
+Hai device trong database demo đều khai báo firmware `1.0.0`, trong khi source firmware hiện tại là `1.3.0`. Cả hai có trạng thái lưu gần nhất là `offline`. Đây là dấu hiệu snapshot chứa node chưa nâng cấp hoặc chưa đăng ký lại sau khi nâng cấp.
 
 ### 17.3 Ma trận kiểm thử nghiệm thu đề xuất
 
@@ -965,7 +964,7 @@ Hai device trong database demo đều khai báo firmware `1.0.0`, trong khi sour
 | AT-02 | Provision Wi-Fi đúng | Lưu NVS, reboot, nhận DHCP IP |
 | AT-03 | Wi-Fi sai | Sau 20 giây quay lại setup AP |
 | AT-04 | mDNS hoạt động | Resolve `edge-controller.local` và đăng ký |
-| AT-05 | mDNS lỗi | Dùng gateway `10.42.0.1` và đăng ký |
+| AT-05 | mDNS lỗi | Không gọi nhầm router; retry cho đến khi Pi được resolve |
 | AT-06 | Đăng ký hai lần cùng hardware ID | Nhận cùng device ID/topic |
 | AT-07 | MQTT connect/disconnect | Retained online và LWT offline đúng |
 | AT-08 | Đo ổn định | Sample 1 giây; không publish khi lệch <1 cm |
@@ -978,7 +977,7 @@ Hai device trong database demo đều khai báo firmware `1.0.0`, trong khi sour
 | AT-15 | WebSocket mất/kết nối lại | UI reconnect và polling fallback |
 | AT-16 | FastAPI/MQTT outage | Node vẫn đo; tự reconnect khi dịch vụ trở lại |
 | AT-17 | Mất Internet | Dashboard sensor vẫn dùng; weather báo stale/error |
-| AT-18 | Reboot Pi | AP và toàn bộ service tự lên |
+| AT-18 | Reboot Pi | Pi nối lại Wi-Fi và toàn bộ service tự lên |
 | AT-19 | Backup/restore | Khôi phục database giữ ID/link/settings |
 | AT-20 | Soak test 72 giờ | Không memory leak, deadlock, mất reconnect |
 
@@ -1001,7 +1000,7 @@ Hai device trong database demo đều khai báo firmware `1.0.0`, trong khi sour
 - Luồng provisioning đến dashboard hoàn chỉnh và dễ demo.
 - Định danh idempotent giúp giữ cấu hình khi node đổi IP/Wi-Fi.
 - Firmware tách lớp rõ, retry không chặn ở steady state.
-- Có LWT, local web, fallback discovery và WebSocket fallback.
+- Có LWT, local web, mDNS retry và WebSocket fallback.
 - SQLite schema đủ cho inventory, topology, cấu hình và vị trí MVP.
 - Controller tích hợp dữ liệu mưa và giao lộ có cache/fallback.
 - Bộ triển khai Pi quan tâm tới user riêng, backup trước replace và integrity check.
@@ -1010,7 +1009,7 @@ Hai device trong database demo đều khai báo firmware `1.0.0`, trong khi sour
 
 | ID | Mức | Rủi ro | Xử lý đề xuất |
 |---|---|---|---|
-| R-01 | Nghiêm trọng | Secret triển khai nằm trong project | Rotate và loại khỏi source/artifact ngay |
+| R-01 | Thấp | Deployment public key dùng chung | Theo dõi fingerprint và thu hồi khi kết thúc project |
 | R-02 | Cao | Lệnh MQTT không có ACK thiết bị; thao tác xóa chờ cố định 0,5 giây | Command/ACK state machine, timeout và retry idempotent |
 | R-03 | Cao | Không auth/TLS/ACL | Hardening trước khi mở rộng mạng |
 | R-04 | Cao | Không lưu lịch sử; outage làm mất telemetry | Buffer edge + bảng time-series/TSDB |
@@ -1029,10 +1028,10 @@ Hai device trong database demo đều khai báo firmware `1.0.0`, trong khi sour
 
 #### Giai đoạn 0 — Khóa baseline và xử lý khẩn cấp
 
-- Xử lý `.pi_deploy_key` và rà soát toàn bộ secret.
-- Tạo Git repository/private remote phù hợp, `.gitignore` cho key, `.venv`, log, `__pycache__`, database runtime và archive.
+- Giữ private SSH key ngoài source và rà soát toàn bộ secret.
+- Duy trì `.gitignore` cho private key, `.venv`, log, `__pycache__`, SQLite journal và archive.
 - Clone repository trực tiếp trên Pi và xác nhận `install.sh` có thể tái lập deployment.
-- Đồng bộ firmware node lên 1.2.1 và xác nhận registration.
+- Đồng bộ firmware node lên 1.3.0 và xác nhận registration qua mDNS trên LAN.
 
 #### Giai đoạn 1 — Pilot tin cậy
 
@@ -1118,11 +1117,11 @@ arduino/
 
 | Dịch vụ | Port | URL/topic mẫu |
 |---|---:|---|
-| Dashboard | 8000/TCP | `http://10.42.0.1:8000/` |
+| Dashboard | 8000/TCP | `http://water-monitor.local:8000/` |
 | Settings | 8000/TCP | `http://water-monitor.local:8000/settings` |
 | Weather | 8000/TCP | `http://water-monitor.local:8000/weather` |
-| Health | 8000/TCP | `http://10.42.0.1:8000/health` |
-| Swagger | 8000/TCP | `http://10.42.0.1:8000/docs` |
+| Health | 8000/TCP | `http://edge-controller.local:8000/health` |
+| Swagger | 8000/TCP | `http://edge-controller.local:8000/docs` |
 | MQTT | 1883/TCP | `devices/#` |
 | ESP32 local web | 80/TCP | `http://water-001.local/` |
 | Provisioning | 80/TCP | `http://192.168.4.1/` hoặc `http://water.local/` |
@@ -1130,14 +1129,14 @@ arduino/
 ### Phụ lục C — Checklist bàn giao
 
 - [ ] Điền người lập/kiểm tra/phê duyệt và mã phát hành.
-- [ ] Xác minh và loại mọi private key/secret khỏi project.
+- [ ] Xác minh Git chỉ chứa SSH public key; private key vẫn ở ngoài project.
 - [ ] Tạo `.gitignore` và repository có kiểm soát phiên bản.
-- [ ] Biên dịch firmware 1.2.1 đúng board profile.
+- [ ] Biên dịch firmware 1.3.0 đúng board profile.
 - [ ] Chạy unit/integration tests.
 - [ ] Chạy đầy đủ ma trận nghiệm thu trên ESP32/Pi thật.
 - [ ] Clone Git trên Pi và chạy lại `deploy/pi/install.sh` từ trạng thái sạch.
 - [ ] Kiểm tra nội dung archive không chứa key, log, venv hoặc dữ liệu ngoài ý muốn.
-- [ ] Ghi lại cấu hình AP, serial number, MAC và vị trí lắp từng node trong hồ sơ riêng.
+- [ ] Ghi lại SSID LAN, serial number, MAC và vị trí lắp từng node trong hồ sơ riêng.
 - [ ] Kiểm tra backup và phục hồi SQLite.
 - [ ] Phê duyệt risk acceptance nếu vẫn vận hành anonymous MQTT/API.
 - [ ] Tag phiên bản firmware/backend và lưu release notes.
