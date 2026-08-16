@@ -7,7 +7,7 @@ vị trí nút giao và dự báo mưa theo quận Hà Nội.
 
 Phiên bản hiện tại:
 
-- ESP32 firmware: `1.2.1`.
+- ESP32 firmware: `1.3.0`.
 - Python: `3.11+` (đã chạy trên Python 3.13 ARM64 của Raspberry Pi OS).
 - ESP32 Arduino core đã kiểm tra: `3.1.3`.
 - FastAPI phục vụ HTTP trên cổng `8000`.
@@ -20,8 +20,7 @@ Phiên bản hiện tại:
 - Provisioning Wi-Fi bằng AP `WaterSensor-Setup` và captive portal.
 - Lưu Wi-Fi, device ID và MQTT topic trong NVS của ESP32.
 - Tự đăng ký node theo hardware ID; cùng một board sẽ nhận lại device ID cũ.
-- Tìm controller qua `edge-controller.local`; trên mạng AP của Pi có thêm
-  fallback về DHCP gateway `10.42.0.1`.
+- Tìm controller qua `edge-controller.local` trên cùng mạng Wi-Fi LAN.
 - Đọc HY-SRF05 mỗi giây, chỉ publish khi thay đổi ít nhất `1 cm`.
 - MQTT retained status và Last Will `offline`.
 - Dashboard cập nhật realtime bằng WebSocket, polling là cơ chế dự phòng.
@@ -32,27 +31,7 @@ Phiên bản hiện tại:
 
 ## 2. Kiến trúc
 
-### Chế độ A — Pi phát Wi-Fi riêng
-
-Phù hợp khi hệ thống cần hoạt động độc lập với router:
-
-```text
-ESP32/HY-SRF05
-      │ Wi-Fi WaterController
-      ▼
-Raspberry Pi wlan0: 10.42.0.1
-      ├── FastAPI/dashboard :8000
-      ├── Mosquitto MQTT    :1883
-      ├── SQLite database
-      └── Open-Meteo/OSM qua Ethernet hoặc USB Wi-Fi thứ hai
-```
-
-Trong chế độ này, fallback `WiFi.gatewayIP()` của firmware luôn trỏ đúng về
-Pi. Hệ thống sensor/MQTT/dashboard vẫn chạy khi không có Internet.
-
-### Chế độ B — Pi và ESP32 cùng Wi-Fi nhà
-
-Phù hợp khi không có Ethernet và muốn Pi dùng Internet qua Wi-Fi:
+Raspberry Pi, ESP32 và thiết bị mở dashboard cùng kết nối một router Wi-Fi:
 
 ```text
 Router Wi-Fi
@@ -62,9 +41,9 @@ Router Wi-Fi
   └── Điện thoại/tablet mở dashboard
 ```
 
-Trong chế độ này, firmware phải resolve được `edge-controller.local`. DHCP
-gateway là router, không phải Pi, nên gateway fallback không dùng được để tìm
-controller. Không dùng Wi-Fi Guest hoặc mạng có client isolation.
+Firmware resolve `edge-controller.local` qua mDNS. DHCP gateway là router,
+không phải Pi, nên firmware không dùng gateway làm controller. Không dùng
+Wi-Fi Guest hoặc mạng có client isolation.
 
 ### Cấu hình demo đã sử dụng
 
@@ -77,12 +56,10 @@ lại đúng môi trường thử nghiệm:
 | Raspberry Pi SSH password | `123` |
 | Pi LAN IP từng sử dụng | `192.168.1.3` (DHCP, có thể thay đổi) |
 | Wi-Fi nhà | `Long706` |
-| Pi AP SSID/password | `WaterController` / `12345678` |
 | ESP setup SSID/password | `WaterSensor-Setup` / `12345678` |
-| Pi AP IP | `10.42.0.1` |
 
 Password của Wi-Fi nhà không nằm trong source; nhập trực tiếp bằng captive
-portal hoặc `nmcli` khi dựng lại hệ thống.
+portal ESP32 hoặc cấu hình mạng của Raspberry Pi khi dựng lại hệ thống.
 
 ## 3. Luồng một node mới
 
@@ -129,15 +106,17 @@ UNPROVISIONED → PROVISIONING_AP → WIFI_CONFIGURED → CONNECT_WIFI
 │   ├── data/water_controller.demo.db Snapshot demo 2 node/1 link
 │   └── static/                        Dashboard HTML/CSS/JavaScript
 └── deploy/pi/
-    ├── install.sh                    Cài app/AP/service trên Pi
-    ├── verify.sh                     Kiểm tra deployment chế độ AP
+    ├── install.sh                    Cài app/service và SSH public key trên Pi
+    ├── verify.sh                     Kiểm tra deployment trên Wi-Fi LAN
+    ├── ssh/water-controller-deploy.pub
     ├── water-controller.service      systemd unit
     ├── mosquitto-water-controller.conf
     └── README.md                     Hướng dẫn deploy chi tiết
 ```
 
-Các file `.venv`, log, SQLite WAL/SHM, archive build và SSH deployment key là
-artifact cục bộ, không cần đưa vào repository. File SQLite chính được giữ để
+Các file `.venv`, log, SQLite WAL/SHM, archive build và SSH **private key** là
+artifact cục bộ, không đưa vào repository. Public key dùng để cấu hình
+`authorized_keys` được lưu tại `deploy/pi/ssh/`. File SQLite chính được giữ để
 khôi phục đầy đủ dữ liệu demo.
 
 ## 5. Phần cứng node
@@ -170,7 +149,7 @@ Các module/lớp chính:
 - `ConfigManager`: NVS namespace `water-iot`, Wi-Fi và registration.
 - `ProvisioningServer`: AP/captive DNS và form cấu hình.
 - `WiFiConnectionManager`: kết nối/retry Wi-Fi.
-- `ControllerDiscovery`: mDNS rồi DHCP gateway fallback.
+- `ControllerDiscovery`: tìm Pi bằng mDNS `edge-controller.local`.
 - `ControllerClient`: đăng ký qua HTTP.
 - `MQTTManager`: status, telemetry và command.
 - `SensorManager`: đo HY-SRF05.
@@ -384,64 +363,22 @@ git clone https://github.com/USER/REPOSITORY.git ~/water-controller-project
 cd ~/water-controller-project
 ```
 
-### Cài chế độ Pi phát AP
+### Cài controller trên Wi-Fi LAN
 
-Installer sẽ cài Python, Mosquitto, Avahi, NetworkManager, app, database,
-systemd service và AP `WaterController` tại `10.42.0.1`:
+Trước khi chạy installer, cấu hình Raspberry Pi và các ESP32 kết nối cùng một
+Wi-Fi router 2,4 GHz. Installer không tạo hoặc thay đổi access point:
 
 ```bash
-sudo WATER_AP_PASSWORD='12345678' bash deploy/pi/install.sh
+sudo bash deploy/pi/install.sh
 sudo reboot
 ```
 
-Sau reboot:
-
-```text
-SSID       WaterController
-Password   12345678
-Pi IP      10.42.0.1
-Dashboard  http://10.42.0.1:8000/
-SSH        ssh admin@10.42.0.1
-```
-
-Kiểm tra:
+Mặc định installer thêm public key
+`deploy/pi/ssh/water-controller-deploy.pub` vào
+`/home/admin/.ssh/authorized_keys`. Nếu username Pi khác `admin`:
 
 ```bash
-cd ~/water-controller-project
-sudo bash deploy/pi/verify.sh
-```
-
-### Chuyển sang chế độ Pi và ESP cùng Wi-Fi nhà
-
-Installer mặc định tạo AP. Sau khi app đã được cài, cấu hình Pi ưu tiên
-profile Wi-Fi nhà và tắt autoconnect của AP:
-
-```bash
-nmcli connection show
-sudo nmcli connection modify 'HOME_WIFI_PROFILE' \
-  connection.autoconnect yes connection.autoconnect-priority 200
-sudo nmcli connection modify WaterController connection.autoconnect no
-```
-
-Systemd unit của gói AP quảng bá alias dashboard về `10.42.0.1`. Trong LAN
-mode, tạo override để controller tự phát hiện IP mới:
-
-```bash
-sudo systemctl edit water-controller.service
-```
-
-Nhập nội dung:
-
-```ini
-[Service]
-Environment=WATER_MDNS_ADDRESS=
-```
-
-Sau đó:
-
-```bash
-sudo systemctl daemon-reload
-sudo reboot
+sudo WATER_SSH_USER='pi-user' bash deploy/pi/install.sh
 ```
 
 Từ điện thoại/tablet cùng Wi-Fi:
@@ -451,8 +388,12 @@ http://edge-controller.local:8000/
 http://water-monitor.local:8000/
 ```
 
-`verify.sh` kiểm tra riêng topology AP `10.42.0.1`; ở LAN mode hãy dùng các
-lệnh kiểm tra service/health trong phần tiếp theo.
+Kiểm tra service, IP LAN, mDNS, FastAPI và MQTT:
+
+```bash
+cd ~/water-controller-project
+sudo bash deploy/pi/verify.sh
+```
 
 ## 13. Chạy và quản trị server trên Pi
 
@@ -503,17 +444,10 @@ Nếu deploy bằng Git:
 ```bash
 cd ~/water-controller-project
 git pull --ff-only
-sudo WATER_AP_PASSWORD='12345678' bash deploy/pi/install.sh
+sudo bash deploy/pi/install.sh
 ```
 
-Installer giữ database live trên Pi. Nếu Pi đang dùng LAN mode, installer sẽ
-cấu hình lại AP `WaterController`; sau update cần đảm bảo AP vẫn có
-`connection.autoconnect no` trước khi reboot:
-
-```bash
-sudo nmcli connection modify WaterController connection.autoconnect no
-sudo systemctl restart water-controller
-```
+Installer giữ database live trên Pi và không thay đổi cấu hình Wi-Fi.
 
 ## 15. Kiểm thử end-to-end
 
@@ -522,7 +456,7 @@ sudo systemctl restart water-controller
 3. Flash firmware, mở Serial Monitor `115200`.
 4. Provision SSID/password.
 5. Xác nhận Serial có `[WIFI] Connected`.
-6. Xác nhận `edge-controller.local` resolve hoặc gateway fallback trong AP mode.
+6. Xác nhận `edge-controller.local` resolve trên cùng Wi-Fi LAN.
 7. Xác nhận registration trả device ID/topic.
 8. Xác nhận `[MQTT] Connected`.
 9. Mở `/api/devices` và dashboard.
@@ -534,19 +468,19 @@ sudo systemctl restart water-controller
 
 ### ESP báo `Initial connection timed out`
 
-Đọc các dòng `[WIFI-DIAG]` firmware 1.2.1:
+Đọc các dòng `[WIFI-DIAG]` firmware 1.3.0:
 
-- `Target ... NOT FOUND`: AP không phát, sai SSID hoặc không phải 2.4 GHz.
+- `Target ... NOT FOUND`: sai SSID, router ngoài vùng phủ hoặc không có 2.4 GHz.
 - `AUTH_FAILED`: sai password.
-- `NO_AP_WITH_COMPATIBLE_SECURITY`: ép AP về WPA2/RSN, không WPA3-only.
-- RSSI dưới khoảng `-80 dBm`: đưa node gần AP hơn.
+- `NO_AP_WITH_COMPATIBLE_SECURITY`: cấu hình router WPA2/RSN, không WPA3-only.
+- RSSI dưới khoảng `-80 dBm`: đưa node gần router hơn.
 
 ### ESP kết nối Wi-Fi nhưng không tìm thấy controller
 
 - Kiểm tra `ping edge-controller.local` từ thiết bị cùng mạng có terminal.
 - Kiểm tra `avahi-daemon` và hostname Pi.
-- Trong AP mode, gateway phải là `10.42.0.1`.
-- Trong LAN mode, gateway là router nên mDNS phải hoạt động.
+- Pi và ESP32 phải cùng subnet; không dùng Guest Wi-Fi/client isolation.
+- Gateway là router nên mDNS `edge-controller.local` phải hoạt động.
 - Kiểm tra TCP `8000`, `1883` và multicast DNS UDP `5353`.
 
 ### Dashboard không mở
@@ -575,7 +509,7 @@ upload lại. Upload firmware bình thường không xóa NVS.
 
 - SQLite giữ node, device ID, vị trí, links, settings, intersections và weather
   cache; hiện mới lưu telemetry gần nhất, chưa có time-series dài hạn.
-- Mosquitto đang dùng `allow_anonymous true`; phù hợp mạng lab/AP tin cậy.
+- Mosquitto đang dùng `allow_anonymous true`; chỉ phù hợp Wi-Fi LAN tin cậy.
 - HTTP factory reset/local status chưa có authentication.
 - Chưa có TLS MQTT, OTA, sensor filtering nâng cao hoặc deep sleep.
 - Weather và Overpass phụ thuộc Internet; sensor core vẫn chạy offline.

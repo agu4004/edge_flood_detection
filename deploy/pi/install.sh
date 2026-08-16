@@ -3,10 +3,7 @@ set -Eeuo pipefail
 
 APP_DIR="/opt/water-controller"
 APP_USER="watercontroller"
-AP_CONNECTION="WaterController"
-AP_SSID="${WATER_AP_SSID:-WaterController}"
-AP_INTERFACE="${WATER_AP_INTERFACE:-wlan0}"
-AP_ADDRESS="10.42.0.1/24"
+SSH_USER="${WATER_SSH_USER:-admin}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ ${EUID} -ne 0 ]]; then
@@ -23,31 +20,12 @@ else
   exit 1
 fi
 
-AP_PASSWORD="${WATER_AP_PASSWORD:-}"
-if [[ -z "${AP_PASSWORD}" && -t 0 ]]; then
-  read -r -s -p "Password for Wi-Fi ${AP_SSID} (minimum 8 characters): " AP_PASSWORD
-  echo
-fi
-if [[ ${#AP_PASSWORD} -lt 8 || ${#AP_PASSWORD} -gt 63 ]]; then
-  echo "WATER_AP_PASSWORD must contain 8 to 63 characters." >&2
-  exit 1
-fi
-
 echo "[1/7] Installing Raspberry Pi packages"
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
   python3 python3-venv python3-pip \
   mosquitto mosquitto-clients \
-  avahi-daemon avahi-utils curl network-manager
-
-if ! command -v nmcli >/dev/null 2>&1; then
-  echo "NetworkManager/nmcli is required." >&2
-  exit 1
-fi
-if ! nmcli -t -f DEVICE device status | grep -Fxq "${AP_INTERFACE}"; then
-  echo "Wi-Fi interface ${AP_INTERFACE} was not found." >&2
-  exit 1
-fi
+  avahi-daemon avahi-utils curl git openssh-server
 
 echo "[2/7] Creating application account and directories"
 if ! id "${APP_USER}" >/dev/null 2>&1; then
@@ -91,25 +69,28 @@ install -o root -g root -m 0644 \
   "${SCRIPT_DIR}/mosquitto-water-controller.conf" \
   /etc/mosquitto/conf.d/water-controller.conf
 
-echo "[5/7] Configuring the Raspberry Pi Wi-Fi access point"
-if ! nmcli -t -f NAME connection show | grep -Fxq "${AP_CONNECTION}"; then
-  nmcli connection add \
-    type wifi ifname "${AP_INTERFACE}" con-name "${AP_CONNECTION}" \
-    autoconnect yes ssid "${AP_SSID}"
+echo "[5/7] Installing the deployment SSH public key for ${SSH_USER}"
+SSH_PUBLIC_KEY_FILE="${SCRIPT_DIR}/ssh/water-controller-deploy.pub"
+if [[ ! -f "${SSH_PUBLIC_KEY_FILE}" ]]; then
+  echo "Missing SSH public key: ${SSH_PUBLIC_KEY_FILE}" >&2
+  exit 1
 fi
-nmcli connection modify "${AP_CONNECTION}" \
-  connection.autoconnect yes \
-  connection.autoconnect-priority 100 \
-  connection.interface-name "${AP_INTERFACE}" \
-  802-11-wireless.mode ap \
-  802-11-wireless.band bg \
-  802-11-wireless.channel 6 \
-  802-11-wireless.ssid "${AP_SSID}" \
-  wifi-sec.key-mgmt wpa-psk \
-  wifi-sec.psk "${AP_PASSWORD}" \
-  ipv4.method shared \
-  ipv4.addresses "${AP_ADDRESS}" \
-  ipv6.method disabled
+if ! SSH_PASSWD_ENTRY="$(getent passwd "${SSH_USER}")"; then
+  echo "SSH user ${SSH_USER} does not exist. Set WATER_SSH_USER to the Raspberry Pi login user." >&2
+  exit 1
+fi
+SSH_GROUP="$(id -gn "${SSH_USER}")"
+SSH_HOME="$(cut -d: -f6 <<<"${SSH_PASSWD_ENTRY}")"
+SSH_DIR="${SSH_HOME}/.ssh"
+AUTHORIZED_KEYS="${SSH_DIR}/authorized_keys"
+SSH_PUBLIC_KEY="$(<"${SSH_PUBLIC_KEY_FILE}")"
+install -d -o "${SSH_USER}" -g "${SSH_GROUP}" -m 0700 "${SSH_DIR}"
+touch "${AUTHORIZED_KEYS}"
+if ! grep -qxF "${SSH_PUBLIC_KEY}" "${AUTHORIZED_KEYS}"; then
+  printf '%s\n' "${SSH_PUBLIC_KEY}" >>"${AUTHORIZED_KEYS}"
+fi
+chown "${SSH_USER}:${SSH_GROUP}" "${AUTHORIZED_KEYS}"
+chmod 0600 "${AUTHORIZED_KEYS}"
 
 echo "[6/7] Configuring hostname, mDNS and systemd"
 if command -v raspi-config >/dev/null 2>&1; then
@@ -121,16 +102,17 @@ install -o root -g root -m 0644 \
   "${SCRIPT_DIR}/water-controller.service" \
   /etc/systemd/system/water-controller.service
 systemctl daemon-reload
-systemctl enable NetworkManager.service mosquitto.service avahi-daemon.service water-controller.service
-systemctl restart mosquitto.service avahi-daemon.service water-controller.service
+systemctl enable ssh.service mosquitto.service avahi-daemon.service water-controller.service
+systemctl restart ssh.service mosquitto.service avahi-daemon.service water-controller.service
 
+PI_LAN_IP="$(hostname -I | awk '{print $1}')"
 echo "[7/7] Installation complete"
 echo
-echo "The access point is configured but has not been activated during this SSH session."
-echo "Reboot the Pi, then connect to:"
-echo "  SSID:      ${AP_SSID}"
-echo "  Pi IP:     10.42.0.1"
-echo "  Dashboard: http://water-monitor.local:8000/"
-echo "  ESP32:     edge-controller.local or DHCP gateway 10.42.0.1"
+echo "The installer did not create or modify any Wi-Fi access point."
+echo "Keep the Raspberry Pi and every ESP32 on the same non-guest Wi-Fi network."
+echo "  Pi IP:      ${PI_LAN_IP:-check with hostname -I}"
+echo "  Dashboard:  http://water-monitor.local:8000/"
+echo "  Controller: edge-controller.local"
+echo "  SSH:        ssh ${SSH_USER}@edge-controller.local"
 echo
-echo "Run: sudo reboot"
+echo "Reboot once if the hostname has just changed: sudo reboot"

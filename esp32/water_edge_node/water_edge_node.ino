@@ -14,14 +14,15 @@
 // HY-SRF05 ECHO may be 5 V. Use a suitable voltage divider before GPIO32.
 
 // --------------------------- Prototype config -------------------------
-static const char *FIRMWARE_VERSION = "1.2.1";
+static const char *FIRMWARE_VERSION = "1.3.0";
 static const char *NVS_NAMESPACE = "water-iot";
 static const char *SETUP_SSID = "WaterSensor-Setup";
 static const char *SETUP_PASSWORD = "12345678";
 static const char *CONTROLLER_MDNS_HOST = "edge-controller";
 
-// Controller discovery order: edge-controller.local, then the DHCP gateway.
-// On the WaterController AP the gateway is always the Raspberry Pi.
+// The Raspberry Pi and ESP32 share the same Wi-Fi LAN. The controller is
+// discovered exclusively through edge-controller.local; the DHCP gateway is
+// the router and must never be treated as the controller.
 
 static const uint16_t CONTROLLER_HTTP_PORT = 8000;
 static const uint16_t MQTT_PORT = 1883;
@@ -124,7 +125,7 @@ bool printTargetNetworkDiagnostics(const String &targetSsid) {
       wifiAuthModeName(authMode), static_cast<int>(authMode));
   }
   if (!targetFound) {
-    Serial.printf("[WIFI-DIAG] Target '%s' NOT FOUND; check that the Pi AP is active on 2.4 GHz\n",
+    Serial.printf("[WIFI-DIAG] Target '%s' NOT FOUND; check SSID and 2.4 GHz availability\n",
                   targetSsid.c_str());
   }
   WiFi.scanDelete();
@@ -516,16 +517,9 @@ class ControllerDiscovery {
     const IPAddress candidate =
       MDNS.queryHost(CONTROLLER_MDNS_HOST, CONTROLLER_DISCOVERY_TIMEOUT_MS);
     if (candidate == IPAddress(0, 0, 0, 0)) {
-      const IPAddress gateway = WiFi.gatewayIP();
-      if (gateway == IPAddress(0, 0, 0, 0)) {
-        Serial.printf("[CONTROLLER] %s.local not found and DHCP gateway unavailable; retry later\n",
-                      CONTROLLER_MDNS_HOST);
-        return false;
-      }
-      resolvedAddress = gateway;
-      Serial.printf("[CONTROLLER] %s.local not found; DHCP gateway fallback -> %s\n",
-                    CONTROLLER_MDNS_HOST, resolvedAddress.toString().c_str());
-      return true;
+      Serial.printf("[CONTROLLER] %s.local not found on the Wi-Fi LAN; retry later\n",
+                    CONTROLLER_MDNS_HOST);
+      return false;
     }
 
     resolvedAddress = candidate;
